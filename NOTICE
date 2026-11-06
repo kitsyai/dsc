@@ -1,0 +1,9 @@
+dsc
+Copyright 2026 HEYPKV INNOVATIONS PRIVATE LIMITED
+
+This product includes software developed by HEYPKV INNOVATIONS PRIVATE LIMITED
+(https://kitsy.ai).
+
+This product includes purego (https://github.com/ebitengine/purego),
+Copyright 2022 The Ebitengine Authors, licensed under the Apache License,
+Version 2.0. It is compiled into the dsc binary for macOS and Linux.
