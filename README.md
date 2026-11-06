@@ -102,7 +102,7 @@ Errors are `{"error": code, "message": text}`:
   hey hub, which enforces its origin allow-list and a CORS preflight on
   every request (`X-Hey-Client` header).
 - **No direct browser access.** `dsc` answers no CORS preflight, requires
-  `X-Hey-Client`, and checks the `Host` header, so a page can't call its
+  `X-Hey-Client`, and only accepts a loopback `Host`, so a page can't call its
   port directly, even through DNS rebinding.
 - **No key material leaves the token.** A PIN typed into `dsc`'s dialog goes
   straight to the driver and is never stored or logged. On Windows, the

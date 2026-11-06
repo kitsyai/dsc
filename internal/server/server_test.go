@@ -65,8 +65,14 @@ func TestGuards(t *testing.T) {
 	if rec := do(h, "GET", "/healthz", "127.0.0.1:7451", nil, ""); rec.Code != 200 {
 		t.Fatalf("healthz: %d", rec.Code)
 	}
-	if rec := do(h, "GET", "/healthz", "evil.example:7451", nil, ""); rec.Code != http.StatusMisdirectedRequest {
-		t.Fatalf("rebinding host accepted: %d", rec.Code)
+	for _, host := range []string{"evil.example:7451", "evil.example", "127.0.0.1.evil.example:7451"} {
+		if rec := do(h, "GET", "/healthz", host, nil, ""); rec.Code != http.StatusMisdirectedRequest {
+			t.Fatalf("rebinding host %q accepted: %d", host, rec.Code)
+		}
+	}
+	// Requests proxied by the hey hub keep the hub's Host.
+	if rec := do(h, "GET", "/healthz", "127.0.0.1:8525", nil, ""); rec.Code != 200 {
+		t.Fatalf("hub host rejected: %d", rec.Code)
 	}
 	if rec := do(h, "GET", "/certificates", "127.0.0.1:7451", nil, ""); rec.Code != http.StatusForbidden {
 		t.Fatalf("missing X-Hey-Client accepted: %d", rec.Code)

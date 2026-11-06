@@ -13,7 +13,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -26,8 +25,7 @@ import (
 type Server struct {
 	Store   keystore.Store
 	Version string
-	// Port is the loopback port; requests must carry Host 127.0.0.1:Port or
-	// localhost:Port (DNS-rebinding guard).
+	// Port is the loopback port dsc listens on.
 	Port int
 
 	// signMu keeps one signature (and one dialog) at a time.
@@ -73,12 +71,15 @@ func fail(w http.ResponseWriter, status int, code, msg string) {
 	writeJSON(w, status, errorJSON{Error: code, Message: msg})
 }
 
+// hostAllowed is the DNS-rebinding guard: the Host header must name the
+// loopback interface. Any port is accepted, because requests proxied by the
+// hey hub keep the hub's Host (127.0.0.1:8525).
 func (s *Server) hostAllowed(host string) bool {
-	h, p, err := net.SplitHostPort(host)
-	if err != nil || p != strconv.Itoa(s.Port) {
-		return false
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		h = host
 	}
-	return h == "127.0.0.1" || h == "localhost"
+	return h == "127.0.0.1" || h == "localhost" || h == "[::1]" || h == "::1"
 }
 
 // Handler returns the API.
