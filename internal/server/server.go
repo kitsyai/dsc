@@ -217,7 +217,7 @@ func (s *Server) validationData(w http.ResponseWriter, r *http.Request) {
 	if fetch == nil {
 		fetch = validation.PublicHTTP()
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	ctx, cancel := context.WithTimeout(r.Context(), 180*time.Second)
 	defer cancel()
 	res, err := validation.Collect(ctx, der, nil, fetch)
 	switch {

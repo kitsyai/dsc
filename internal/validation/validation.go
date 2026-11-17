@@ -75,7 +75,7 @@ func PublicHTTP() Fetcher {
 		},
 	}
 	client := &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: 60 * time.Second, // government CA servers (cca.gov.in, ocvs.gov.in) can be slow
 		Transport: &http.Transport{
 			Proxy:               http.ProxyFromEnvironment,
 			DialContext:         dialer.DialContext,
