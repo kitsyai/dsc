@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 
@@ -17,12 +18,14 @@ import (
 )
 
 // DefaultModules lists where common token drivers install their PKCS#11
-// library. Missing paths are skipped; add others with --pkcs11 or
-// DSC_PKCS11_MODULES. Vendor paths vary by driver version, so this list is a
-// convenience, not a guarantee.
+// library. Entries may be glob patterns (driver file names carry versions,
+// e.g. libcastle_v2.1.0.0.dylib). Missing paths are skipped; add others with
+// --pkcs11 or DSC_PKCS11_MODULES. Vendor paths vary by driver version, so this
+// list is a convenience, not a guarantee.
 func DefaultModules() []string {
 	if runtime.GOOS == "darwin" {
 		return []string{
+			"/usr/local/lib/libcastle_v*.dylib",                                     // ePass2003, newer drivers (e.g. libcastle_v2.1.0.0.dylib)
 			"/usr/local/lib/libcastle.1.0.0.dylib",                                  // ePass2003 (Longmai/Castle)
 			"/usr/local/lib/libcastle.dylib",                                        // ePass2003
 			"/usr/local/lib/WatchData/ProxKey/libwdpkcs_SignatureP11.dylib",         // ProxKey (WatchData)
@@ -32,6 +35,7 @@ func DefaultModules() []string {
 		}
 	}
 	return []string{
+		"/usr/lib/libcastle_v*.so*",                                // ePass2003, newer drivers
 		"/usr/lib/libcastle.so.1.0.0",                              // ePass2003
 		"/usr/lib/WatchData/ProxKey/lib/libwdpkcs_SignatureP11.so", // ProxKey (WatchData)
 		"/usr/lib/libwdpkcs_SignatureP11.so",                       // ProxKey
@@ -77,7 +81,7 @@ type Store struct {
 func New(explicit, defaults []string, prompt keystore.Prompter) *Store {
 	s := &Store{explicit: map[string]bool{}, libs: map[string]*lib{}, refs: map[string]certRef{}, prompt: prompt}
 	seen := map[string]bool{}
-	for _, p := range append(append([]string{}, explicit...), defaults...) {
+	for _, p := range append(append([]string{}, explicit...), expandDefaults(defaults)...) {
 		if !seen[p] {
 			seen[p] = true
 			s.paths = append(s.paths, p)
@@ -113,6 +117,23 @@ func (s *Store) loadAll() ([]*lib, error) {
 		out = append(out, l)
 	}
 	return out, nil
+}
+
+// expandDefaults expands glob patterns among the default driver paths, newest
+// file name first, so a versioned driver (libcastle_v2.1.0.0.dylib) is found
+// without configuration.
+func expandDefaults(defaults []string) []string {
+	var out []string
+	for _, p := range defaults {
+		if !strings.ContainsAny(p, "*?[") {
+			out = append(out, p)
+			continue
+		}
+		matches, _ := filepath.Glob(p)
+		sort.Sort(sort.Reverse(sort.StringSlice(matches)))
+		out = append(out, matches...)
+	}
+	return out
 }
 
 // List reads certificates from every present token. Certificates are public

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -145,5 +146,25 @@ func TestMissingExplicitModule(t *testing.T) {
 	quiet := New(nil, []string{"/nonexistent/driver.so"}, &fakePrompt{})
 	if certs, err := quiet.List(); err != nil || len(certs) != 0 {
 		t.Fatalf("missing default drivers are skipped: %v %v", certs, err)
+	}
+}
+
+func TestDefaultGlobsFindVersionedDrivers(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"libcastle_v2.1.0.0.dylib", "libcastle_v1.0.0.0.dylib", "other.dylib"} {
+		os.WriteFile(filepath.Join(dir, name), nil, 0o644)
+	}
+	got := expandDefaults([]string{filepath.Join(dir, "libcastle_v*.dylib"), "/fixed/path.so"})
+	want := []string{filepath.Join(dir, "libcastle_v2.1.0.0.dylib"), filepath.Join(dir, "libcastle_v1.0.0.0.dylib"), "/fixed/path.so"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+	if !strings.Contains(strings.Join(DefaultModules(), " "), "libcastle_v*") {
+		t.Fatal("the versioned ePass2003 driver name must be in the defaults")
 	}
 }
