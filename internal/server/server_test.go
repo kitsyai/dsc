@@ -146,7 +146,7 @@ func TestValidationEndpoint(t *testing.T) {
 	body := `{"certificate":"` + base64.StdEncoding.EncodeToString(der) + `"}`
 	rec := do(h, "POST", "/validation", "127.0.0.1:1", hdr, body)
 	var res validationResponse
-	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &res) != nil || len(res.Chain) != 0 {
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &res) != nil || len(res.Chain) != 0 || len(res.Problems) != 0 {
 		t.Fatalf("self-signed: %d %s", rec.Code, rec.Body)
 	}
 	if rec := do(h, "POST", "/validation", "127.0.0.1:1", nil, body); rec.Code != http.StatusForbidden {

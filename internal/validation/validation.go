@@ -135,8 +135,10 @@ func checkScheme(u *url.URL) error {
 	return nil
 }
 
+// selfSigned checks the self-signature directly: CheckSignatureFrom would
+// reject a self-signed end-entity certificate for not being a CA.
 func selfSigned(c *x509.Certificate) bool {
-	return bytes.Equal(c.RawIssuer, c.RawSubject) && c.CheckSignatureFrom(c) == nil
+	return bytes.Equal(c.RawIssuer, c.RawSubject) && c.CheckSignature(c.SignatureAlgorithm, c.RawTBSCertificate, c.Signature) == nil
 }
 
 // parseCerts reads a caIssuers response: DER, PEM, or a degenerate PKCS#7
