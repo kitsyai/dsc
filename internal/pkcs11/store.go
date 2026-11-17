@@ -3,7 +3,9 @@
 package pkcs11
 
 import (
+	"crypto"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -237,10 +239,7 @@ func pinError(err error) error {
 
 // Sign asks for consent and the PIN in one native dialog (or consent only
 // for PIN-pad readers), logs in, signs, and logs out again.
-func (s *Store) Sign(id string, digest []byte, consent keystore.Consent) ([]byte, error) {
-	if len(digest) != 32 {
-		return nil, fmt.Errorf("expected a SHA-256 digest")
-	}
+func (s *Store) Sign(id string, data []byte, consent keystore.Consent) ([]byte, error) {
 	s.mu.Lock()
 	ref, ok := s.refs[id]
 	s.mu.Unlock()
@@ -286,7 +285,7 @@ func (s *Store) Sign(id string, digest []byte, consent keystore.Consent) ([]byte
 
 	var sig []byte
 	var err error
-	s.onThread(func() { sig, err = s.signOnToken(ref, pinPad, pin, digest) })
+	s.onThread(func() { sig, err = s.signOnToken(ref, pinPad, pin, data) })
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dsc: signing with %s (%s) failed: %v\n", ref.cert.Subject.CommonName, ref.lib.path, err)
 		return nil, pinError(err)
@@ -294,24 +293,95 @@ func (s *Store) Sign(id string, digest []byte, consent keystore.Consent) ([]byte
 	return sig, nil
 }
 
-// signOnToken logs in, finds the private key and signs. It runs on the
+// signAttempt is one way to have the token make the signature.
+type signAttempt struct {
+	mech  ckULong
+	input []byte
+}
+
+// signAttempts orders the mechanisms to try. CKM_SHA256_RSA_PKCS (the token
+// hashes) comes first: some cards, such as the ePass2003, refuse raw
+// CKM_RSA_PKCS with CKR_DEVICE_ERROR. Both produce the same RSA PKCS#1 v1.5
+// SHA-256 signature. If the driver doesn't list its mechanisms, try both.
+func signAttempts(mechs []ckULong, data []byte) []signAttempt {
+	sum := sha256.Sum256(data)
+	hashed := signAttempt{mech: ckmSHA256RSAPKCS, input: data}
+	raw := signAttempt{mech: ckmRSAPKCS, input: append(append([]byte{}, keystore.SHA256DigestInfo...), sum[:]...)}
+	has := map[ckULong]bool{}
+	for _, m := range mechs {
+		has[m] = true
+	}
+	switch {
+	case has[ckmSHA256RSAPKCS] && !has[ckmRSAPKCS]:
+		return []signAttempt{hashed}
+	case has[ckmRSAPKCS] && !has[ckmSHA256RSAPKCS]:
+		return []signAttempt{raw}
+	default:
+		return []signAttempt{hashed, raw}
+	}
+}
+
+// retryable reports errors where another mechanism may still work. PIN
+// errors are never retried, so a wrong PIN can't lock the token.
+func retryable(err error) bool {
+	var e *Error
+	if !errors.As(err, &e) {
+		return errors.Is(err, errBadSignature)
+	}
+	switch e.RV {
+	case 0x005, 0x006, 0x007, 0x021, 0x030, 0x054, 0x063, 0x068, 0x070, 0x071:
+		return true
+	}
+	return false
+}
+
+var errBadSignature = errors.New("the token returned a signature that does not verify")
+
+// signOnToken tries each signing mechanism the token supports until one
+// produces a signature that verifies with the certificate. It runs on the
 // PKCS#11 thread.
-func (s *Store) signOnToken(ref certRef, pinPad bool, pin string, digest []byte) ([]byte, error) {
+func (s *Store) signOnToken(ref certRef, pinPad bool, pin string, data []byte) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	l := ref.lib
-	session, err := l.open(ref.slot)
-	if err != nil {
-		return nil, err
-	}
-	defer l.closeSession(session)
-
 	pinBytes := []byte(pin)
 	defer func() {
 		for i := range pinBytes {
 			pinBytes[i] = 0
 		}
 	}()
+	pub, _ := ref.cert.PublicKey.(*rsa.PublicKey)
+	sum := sha256.Sum256(data)
+	mechs, _ := ref.lib.mechanisms(ref.slot)
+	var last error
+	for i, a := range signAttempts(mechs, data) {
+		sig, err := s.signOnce(ref, pinPad, pinBytes, a)
+		if err == nil && pub != nil && rsa.VerifyPKCS1v15(pub, crypto.SHA256, sum[:], sig) != nil {
+			err = errBadSignature
+		}
+		if err == nil {
+			if i > 0 {
+				fmt.Fprintf(os.Stderr, "dsc: signed with %s\n", mechName(a.mech))
+			}
+			return sig, nil
+		}
+		fmt.Fprintf(os.Stderr, "dsc: %s with %s failed: %v\n", mechName(a.mech), ref.lib.path, err)
+		last = err
+		if !retryable(err) {
+			break
+		}
+	}
+	return nil, last
+}
+
+// signOnce opens a session, logs in, finds the key and signs with one
+// mechanism.
+func (s *Store) signOnce(ref certRef, pinPad bool, pinBytes []byte, a signAttempt) ([]byte, error) {
+	l := ref.lib
+	session, err := l.open(ref.slot)
+	if err != nil {
+		return nil, err
+	}
+	defer l.closeSession(session)
 	login := func(userType ckULong) ckULong {
 		if pinPad {
 			return l.login(session, userType, nil, 0)
@@ -342,8 +412,7 @@ func (s *Store) signOnToken(ref certRef, pinPad bool, pin string, digest []byte)
 	if pub, ok := ref.cert.PublicKey.(*rsa.PublicKey); ok {
 		sigLen = pub.Size()
 	}
-	data := append(append([]byte{}, keystore.SHA256DigestInfo...), digest...)
-	return l.signRaw(session, keys[0], data, sigLen, reauth)
+	return l.signWith(session, keys[0], a.mech, a.input, sigLen, reauth)
 }
 
 // Close finalizes every loaded driver.

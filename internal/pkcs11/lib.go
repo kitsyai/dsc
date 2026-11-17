@@ -44,6 +44,7 @@ const (
 	ckaValue              = 0x011
 	ckaID                 = 0x102
 	ckmRSAPKCS            = 0x001
+	ckmSHA256RSAPKCS      = 0x040
 	unavailableInfo       = ^ckULong(0)
 )
 
@@ -78,7 +79,22 @@ var rvNames = map[ckULong]string{
 	0x070: "CKR_MECHANISM_INVALID", 0x071: "CKR_MECHANISM_PARAM_INVALID", 0x090: "CKR_OPERATION_ACTIVE",
 	0x091: "CKR_OPERATION_NOT_INITIALIZED", 0x0A0: "CKR_PIN_INCORRECT", 0x0A4: "CKR_PIN_LOCKED",
 	0x0B3: "CKR_SESSION_HANDLE_INVALID", 0x0E0: "CKR_TOKEN_NOT_PRESENT", 0x101: "CKR_USER_NOT_LOGGED_IN",
-	0x150: "CKR_BUFFER_TOO_SMALL",
+	0x150: "CKR_BUFFER_TOO_SMALL", 0x054: "CKR_FUNCTION_NOT_SUPPORTED",
+}
+
+var mechNames = map[ckULong]string{
+	0x000: "CKM_RSA_PKCS_KEY_PAIR_GEN", 0x001: "CKM_RSA_PKCS", 0x003: "CKM_RSA_X_509",
+	0x005: "CKM_MD5_RSA_PKCS", 0x006: "CKM_SHA1_RSA_PKCS", 0x00D: "CKM_RSA_PKCS_PSS",
+	0x040: "CKM_SHA256_RSA_PKCS", 0x041: "CKM_SHA384_RSA_PKCS", 0x042: "CKM_SHA512_RSA_PKCS",
+	0x043: "CKM_SHA256_RSA_PKCS_PSS", 0x220: "CKM_SHA_1", 0x250: "CKM_SHA256",
+}
+
+// MechName names a PKCS#11 mechanism for logs and `dsc diagnose`.
+func mechName(m ckULong) string {
+	if name, ok := mechNames[m]; ok {
+		return name
+	}
+	return fmt.Sprintf("0x%X", m)
 }
 
 func (e *Error) Error() string {
@@ -102,6 +118,7 @@ type lib struct {
 	initialize        func(args unsafe.Pointer) ckULong
 	finalize          func(reserved unsafe.Pointer) ckULong
 	getSlotList       func(present uint8, slots *ckULong, count *ckULong) ckULong
+	getMechanismList  func(slot ckULong, list *ckULong, count *ckULong) ckULong
 	getTokenInfo      func(slot ckULong, info *byte) ckULong
 	openSession       func(slot, flags ckULong, app, notify unsafe.Pointer, session *ckULong) ckULong
 	closeSession      func(session ckULong) ckULong
@@ -132,6 +149,7 @@ func load(path string) (l *lib, err error) {
 	reg(&l.initialize, "C_Initialize")
 	reg(&l.finalize, "C_Finalize")
 	reg(&l.getSlotList, "C_GetSlotList")
+	reg(&l.getMechanismList, "C_GetMechanismList")
 	reg(&l.getTokenInfo, "C_GetTokenInfo")
 	reg(&l.openSession, "C_OpenSession")
 	reg(&l.closeSession, "C_CloseSession")
@@ -196,6 +214,20 @@ func (l *lib) tokenInfo(slot ckULong) (tokenInfo, error) {
 	}, nil
 }
 
+// mechanisms lists what the token in slot supports (nil if the driver
+// can't say).
+func (l *lib) mechanisms(slot ckULong) ([]ckULong, error) {
+	var n ckULong
+	if err := check("C_GetMechanismList", l.getMechanismList(slot, nil, &n)); err != nil || n == 0 {
+		return nil, err
+	}
+	list := make([]ckULong, n)
+	if err := check("C_GetMechanismList", l.getMechanismList(slot, &list[0], &n)); err != nil {
+		return nil, err
+	}
+	return list[:n], nil
+}
+
 func (l *lib) find(session ckULong, template []attribute) ([]ckULong, error) {
 	if err := check("C_FindObjectsInit", l.findObjectsInit(session, &template[0], ckULong(len(template)))); err != nil {
 		return nil, err
@@ -250,13 +282,14 @@ func (l *lib) open(slot ckULong) (ckULong, error) {
 	return session, err
 }
 
-// signRaw signs data (a DigestInfo) with CKM_RSA_PKCS. sigLen is the
+// signWith signs data with mech: a DigestInfo for CKM_RSA_PKCS, or the
+// message itself for CKM_SHA256_RSA_PKCS (the token hashes). sigLen is the
 // expected signature size (the RSA modulus length): the signature is
 // requested in one call with a buffer of that size, because some vendor
 // drivers mishandle the separate length query. reauth, if set, is called
 // between C_SignInit and C_Sign for keys marked CKA_ALWAYS_AUTHENTICATE.
-func (l *lib) signRaw(session, key ckULong, data []byte, sigLen int, reauth func() error) ([]byte, error) {
-	m := &mechanism{mech: ckmRSAPKCS}
+func (l *lib) signWith(session, key, mech ckULong, data []byte, sigLen int, reauth func() error) ([]byte, error) {
+	m := &mechanism{mech: mech}
 	if err := check("C_SignInit", l.signInit(session, m, key)); err != nil {
 		return nil, err
 	}

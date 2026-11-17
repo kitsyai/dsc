@@ -105,8 +105,9 @@ func TestSoftHSMListAndSign(t *testing.T) {
 		t.Fatal("listing must not prompt")
 	}
 
-	digest := sha256.Sum256([]byte("signed attributes"))
-	sig, err := store.Sign(certs[0].ID, digest[:], keystore.Consent{Origin: "https://prashantsinha.com", Document: "contract.pdf"})
+	data := []byte("signed attributes")
+	digest := sha256.Sum256(data)
+	sig, err := store.Sign(certs[0].ID, data, keystore.Consent{Origin: "https://prashantsinha.com", Document: "contract.pdf"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,20 +121,20 @@ func TestSoftHSMListAndSign(t *testing.T) {
 
 func TestSoftHSMDeclineAndWrongPIN(t *testing.T) {
 	cert, _ := softToken(t)
-	digest := sha256.Sum256([]byte("x"))
+	digest := []byte("x")
 
 	declined := New([]string{softhsmLib}, nil, &fakePrompt{pin: "1234", allow: false})
 	defer declined.Close()
-	if _, err := declined.Sign(keystore.ID(cert.Raw), digest[:], keystore.Consent{}); !errors.Is(err, keystore.ErrDeclined) {
+	if _, err := declined.Sign(keystore.ID(cert.Raw), digest, keystore.Consent{}); !errors.Is(err, keystore.ErrDeclined) {
 		t.Fatalf("decline: %v", err)
 	}
 
 	wrong := New([]string{softhsmLib}, nil, &fakePrompt{pin: "0000", allow: true})
 	defer wrong.Close()
-	if _, err := wrong.Sign(keystore.ID(cert.Raw), digest[:], keystore.Consent{}); !errors.Is(err, keystore.ErrPINIncorrect) {
+	if _, err := wrong.Sign(keystore.ID(cert.Raw), digest, keystore.Consent{}); !errors.Is(err, keystore.ErrPINIncorrect) {
 		t.Fatalf("wrong PIN: %v", err)
 	}
-	if _, err := wrong.Sign("deadbeef", digest[:], keystore.Consent{}); !errors.Is(err, keystore.ErrNotFound) {
+	if _, err := wrong.Sign("deadbeef", digest, keystore.Consent{}); !errors.Is(err, keystore.ErrNotFound) {
 		t.Fatalf("unknown id: %v", err)
 	}
 }
@@ -166,5 +167,54 @@ func TestDefaultGlobsFindVersionedDrivers(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(DefaultModules(), " "), "libcastle_v*") {
 		t.Fatal("the versioned ePass2003 driver name must be in the defaults")
+	}
+}
+
+func TestSignAttemptOrder(t *testing.T) {
+	order := func(mechs ...ckULong) string {
+		var out []string
+		for _, a := range signAttempts(mechs, []byte("data")) {
+			out = append(out, mechName(a.mech))
+		}
+		return strings.Join(out, ",")
+	}
+	cases := map[string]string{
+		order():                             "CKM_SHA256_RSA_PKCS,CKM_RSA_PKCS",
+		order(ckmRSAPKCS, ckmSHA256RSAPKCS): "CKM_SHA256_RSA_PKCS,CKM_RSA_PKCS",
+		order(ckmSHA256RSAPKCS):             "CKM_SHA256_RSA_PKCS",
+		order(ckmRSAPKCS):                   "CKM_RSA_PKCS",
+	}
+	for got, want := range cases {
+		if got != want {
+			t.Errorf("got %s, want %s", got, want)
+		}
+	}
+	if retryable(&Error{Func: "C_Login", RV: ckrPINIncorrect}) || !retryable(&Error{Func: "C_Sign", RV: 0x30}) {
+		t.Fatal("device errors are retried with the next mechanism; PIN errors never are")
+	}
+}
+
+// Each mechanism alone must produce a signature that verifies, so the
+// fallback order can't change the result.
+func TestSoftHSMEachMechanismVerifies(t *testing.T) {
+	cert, key := softToken(t)
+	store := New([]string{softhsmLib}, nil, &fakePrompt{pin: "1234", allow: true})
+	defer store.Close()
+	if _, err := store.List(); err != nil {
+		t.Fatal(err)
+	}
+	ref := store.refs[keystore.ID(cert.Raw)]
+	data := []byte("signed attributes")
+	sum := sha256.Sum256(data)
+	for _, a := range signAttempts(nil, data) {
+		var sig []byte
+		var err error
+		store.onThread(func() { sig, err = store.signOnce(ref, false, []byte("1234"), a) })
+		if err != nil {
+			t.Fatalf("%s: %v", mechName(a.mech), err)
+		}
+		if err := rsa.VerifyPKCS1v15(&key.PublicKey, crypto.SHA256, sum[:], sig); err != nil {
+			t.Fatalf("%s: signature does not verify: %v", mechName(a.mech), err)
+		}
 	}
 }

@@ -51,9 +51,11 @@ type Store interface {
 	// List returns the signing certificates currently available. It must not
 	// trigger PIN prompts.
 	List() ([]Certificate, error)
-	// Sign produces an RSA PKCS#1 v1.5 signature over a SHA-256 digest with
-	// the key of the certificate id, after the user agreed to consent.
-	Sign(id string, sha256Digest []byte, consent Consent) ([]byte, error)
+	// Sign produces an RSA PKCS#1 v1.5 SHA-256 signature over data with the
+	// key of the certificate id, after the user agreed to consent. The store
+	// hashes data itself, or lets the token hash it (some cards, such as the
+	// ePass2003, only sign that way).
+	Sign(id string, data []byte, consent Consent) ([]byte, error)
 	Close() error
 }
 

@@ -5,7 +5,6 @@
 package server
 
 import (
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -151,10 +150,9 @@ func (s *Server) sign(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "bad_request", fmt.Sprintf("data must be base64, 1 to %d bytes", MaxDataBytes))
 		return
 	}
-	digest := sha256.Sum256(data)
 	consent := keystore.Consent{Origin: r.Header.Get("Origin"), Document: req.Document}
 	s.signMu.Lock()
-	sig, err := s.Store.Sign(req.CertificateID, digest[:], consent)
+	sig, err := s.Store.Sign(req.CertificateID, data, consent)
 	s.signMu.Unlock()
 	switch {
 	case err == nil:

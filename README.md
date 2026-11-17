@@ -63,6 +63,10 @@ DSC_PKCS11_MODULES=/path/to/vendor-pkcs11.so hey up dsc
 dsc list                                    # or: dsc list --pkcs11 /path/to/driver.so
 ```
 
+If signing fails, `dsc diagnose` prints which drivers load, what the token
+supports, and makes one test signature per signing method (one PIN prompt,
+nothing saved). Include its output when reporting a problem.
+
 Only RSA certificates are supported, which covers Indian Class 3 DSCs.
 
 ## API

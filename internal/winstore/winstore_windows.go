@@ -9,6 +9,7 @@ package winstore
 
 import (
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"errors"
 	"fmt"
@@ -156,10 +157,9 @@ func mapErr(r uintptr, err error) error {
 
 // Sign shows the consent dialog, then signs. The token driver shows its own
 // PIN dialog when the key is used.
-func (s *Store) Sign(id string, digest []byte, consent keystore.Consent) ([]byte, error) {
-	if len(digest) != 32 {
-		return nil, fmt.Errorf("expected a SHA-256 digest")
-	}
+func (s *Store) Sign(id string, data []byte, consent keystore.Consent) ([]byte, error) {
+	sum := sha256.Sum256(data)
+	digest := sum[:]
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

@@ -4,7 +4,6 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -23,13 +22,13 @@ type fakeStore struct {
 	certs   []keystore.Certificate
 	err     error
 	gotID   string
-	gotHash []byte
+	gotData []byte
 	gotCons keystore.Consent
 }
 
 func (f *fakeStore) List() ([]keystore.Certificate, error) { return f.certs, nil }
-func (f *fakeStore) Sign(id string, digest []byte, c keystore.Consent) ([]byte, error) {
-	f.gotID, f.gotHash, f.gotCons = id, digest, c
+func (f *fakeStore) Sign(id string, data []byte, c keystore.Consent) ([]byte, error) {
+	f.gotID, f.gotData, f.gotCons = id, data, c
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -106,9 +105,8 @@ func TestCertificatesAndSign(t *testing.T) {
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), base64.StdEncoding.EncodeToString([]byte("sig"))) {
 		t.Fatalf("sign: %d %s", rec.Code, rec.Body)
 	}
-	want := sha256.Sum256(data)
-	if string(store.gotHash) != string(want[:]) {
-		t.Fatal("dsc must sign the SHA-256 of data")
+	if string(store.gotData) != string(data) {
+		t.Fatal("dsc must pass the exact bytes to sign to the store")
 	}
 	if store.gotCons.Origin != "https://prashantsinha.com" || store.gotCons.Document != "contract.pdf" {
 		t.Fatalf("consent not passed through: %+v", store.gotCons)

@@ -40,6 +40,7 @@ func usage() {
 Usage:
   dsc serve --port <port> [--pkcs11 <driver library>]...
   dsc list [--pkcs11 <driver library>]...
+  dsc diagnose [--pkcs11 <driver library>]...   drivers, tokens, mechanisms, test signature
   dsc version
 
 Usually started by hey:  hey up dsc
@@ -61,6 +62,12 @@ func main() {
 		err = serve(os.Args[2:])
 	case "list":
 		err = list(os.Args[2:])
+	case "diagnose":
+		fs := flag.NewFlagSet("diagnose", flag.ExitOnError)
+		var modules multiFlag
+		fs.Var(&modules, "pkcs11", "PKCS#11 driver library (repeatable)")
+		fs.Parse(os.Args[2:])
+		err = diagnose(modules)
 	case "version", "--version", "-v":
 		fmt.Println("dsc", version)
 	case "help", "--help", "-h":
