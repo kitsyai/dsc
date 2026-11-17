@@ -74,12 +74,36 @@ type Store struct {
 	libs     map[string]*lib
 	refs     map[string]certRef
 	prompt   keystore.Prompter
+
+	// calls runs every PKCS#11 call on one locked OS thread. Smart-card
+	// drivers (e.g. ePass2003 on macOS) can tie a session or login to the
+	// thread that made it; Go would otherwise move work between threads.
+	calls chan func()
+}
+
+// worker runs PKCS#11 calls on a single OS thread for the store's lifetime.
+func (s *Store) worker() {
+	runtime.LockOSThread()
+	for f := range s.calls {
+		f()
+	}
+}
+
+// onThread runs f on the PKCS#11 thread and waits for it.
+func (s *Store) onThread(f func()) {
+	done := make(chan struct{})
+	s.calls <- func() {
+		defer close(done)
+		f()
+	}
+	<-done
 }
 
 // New returns a store over the given driver paths. Paths in explicit must
 // load; the others (defaults) are skipped when absent.
 func New(explicit, defaults []string, prompt keystore.Prompter) *Store {
-	s := &Store{explicit: map[string]bool{}, libs: map[string]*lib{}, refs: map[string]certRef{}, prompt: prompt}
+	s := &Store{explicit: map[string]bool{}, libs: map[string]*lib{}, refs: map[string]certRef{}, prompt: prompt, calls: make(chan func())}
+	go s.worker()
 	seen := map[string]bool{}
 	for _, p := range append(append([]string{}, explicit...), expandDefaults(defaults)...) {
 		if !seen[p] {
@@ -138,7 +162,12 @@ func expandDefaults(defaults []string) []string {
 
 // List reads certificates from every present token. Certificates are public
 // objects, so no PIN is needed.
-func (s *Store) List() ([]keystore.Certificate, error) {
+func (s *Store) List() (certs []keystore.Certificate, err error) {
+	s.onThread(func() { certs, err = s.list() })
+	return certs, err
+}
+
+func (s *Store) list() ([]keystore.Certificate, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	libs, err := s.loadAll()
@@ -255,56 +284,77 @@ func (s *Store) Sign(id string, digest []byte, consent keystore.Consent) ([]byte
 		pin = p
 	}
 
+	var sig []byte
+	var err error
+	s.onThread(func() { sig, err = s.signOnToken(ref, pinPad, pin, digest) })
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dsc: signing with %s (%s) failed: %v\n", ref.cert.Subject.CommonName, ref.lib.path, err)
+		return nil, pinError(err)
+	}
+	return sig, nil
+}
+
+// signOnToken logs in, finds the private key and signs. It runs on the
+// PKCS#11 thread.
+func (s *Store) signOnToken(ref certRef, pinPad bool, pin string, digest []byte) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	l := ref.lib
 	session, err := l.open(ref.slot)
 	if err != nil {
-		return nil, pinError(err)
+		return nil, err
 	}
 	defer l.closeSession(session)
 
-	var rv ckULong
-	if pinPad {
-		rv = l.login(session, ckuUser, nil, 0)
-	} else {
-		pinBytes := []byte(pin)
-		if len(pinBytes) == 0 {
-			return nil, keystore.ErrPINIncorrect
-		}
-		rv = l.login(session, ckuUser, &pinBytes[0], ckULong(len(pinBytes)))
+	pinBytes := []byte(pin)
+	defer func() {
 		for i := range pinBytes {
 			pinBytes[i] = 0
 		}
+	}()
+	login := func(userType ckULong) ckULong {
+		if pinPad {
+			return l.login(session, userType, nil, 0)
+		}
+		if len(pinBytes) == 0 {
+			return ckrPINIncorrect
+		}
+		return l.login(session, userType, &pinBytes[0], ckULong(len(pinBytes)))
 	}
-	if rv != ckrOK && rv != ckrUserAlreadyLoggedIn {
-		return nil, pinError(check("C_Login", rv))
+	if rv := login(ckuUser); rv != ckrOK && rv != ckrUserAlreadyLoggedIn {
+		return nil, check("C_Login", rv)
 	}
 	defer l.logout(session)
 
 	class := ckULong(ckoPrivateKey)
 	keys, err := l.find(session, classTemplate(&class, ref.ckaID))
 	if err != nil {
-		return nil, pinError(err)
+		return nil, err
 	}
 	if len(keys) == 0 {
 		return nil, fmt.Errorf("no private key on the token matches this certificate")
 	}
-	data := append(append([]byte{}, keystore.SHA256DigestInfo...), digest...)
-	sig, err := l.signRaw(session, keys[0], data)
-	if err != nil {
-		return nil, pinError(err)
+	var reauth func() error
+	if v, _ := l.attr(session, keys[0], ckaAlwaysAuthenticate); len(v) == 1 && v[0] != 0 {
+		reauth = func() error { return check("C_Login(context-specific)", login(ckuContextSpecific)) }
 	}
-	return sig, nil
+	sigLen := 0
+	if pub, ok := ref.cert.PublicKey.(*rsa.PublicKey); ok {
+		sigLen = pub.Size()
+	}
+	data := append(append([]byte{}, keystore.SHA256DigestInfo...), digest...)
+	return l.signRaw(session, keys[0], data, sigLen, reauth)
 }
 
 // Close finalizes every loaded driver.
 func (s *Store) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, l := range s.libs {
-		l.finalize(nil)
-	}
-	s.libs = map[string]*lib{}
+	s.onThread(func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		for _, l := range s.libs {
+			l.finalize(nil)
+		}
+		s.libs = map[string]*lib{}
+	})
 	return nil
 }

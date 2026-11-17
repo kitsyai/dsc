@@ -31,18 +31,20 @@ const (
 	ckrTokenNotPresent         = 0x0E0
 	ckrDeviceRemoved           = 0x032
 
-	ckfSerialSession     = 0x4
-	ckfOSLockingOK       = 0x2
-	ckfProtectedAuthPath = 0x100
-	ckuUser              = 1
-	ckoCertificate       = 1
-	ckoPrivateKey        = 3
-	ckaClass             = 0x000
-	ckaLabel             = 0x003
-	ckaValue             = 0x011
-	ckaID                = 0x102
-	ckmRSAPKCS           = 0x001
-	unavailableInfo      = ^ckULong(0)
+	ckfSerialSession      = 0x4
+	ckfOSLockingOK        = 0x2
+	ckfProtectedAuthPath  = 0x100
+	ckuUser               = 1
+	ckuContextSpecific    = 2
+	ckaAlwaysAuthenticate = 0x202
+	ckoCertificate        = 1
+	ckoPrivateKey         = 3
+	ckaClass              = 0x000
+	ckaLabel              = 0x003
+	ckaValue              = 0x011
+	ckaID                 = 0x102
+	ckmRSAPKCS            = 0x001
+	unavailableInfo       = ^ckULong(0)
 )
 
 type attribute struct {
@@ -69,7 +71,22 @@ type Error struct {
 	RV   ckULong
 }
 
-func (e *Error) Error() string { return fmt.Sprintf("%s failed: CKR 0x%X", e.Func, e.RV) }
+var rvNames = map[ckULong]string{
+	0x005: "CKR_GENERAL_ERROR", 0x006: "CKR_FUNCTION_FAILED", 0x007: "CKR_ARGUMENTS_BAD",
+	0x030: "CKR_DEVICE_ERROR", 0x031: "CKR_DEVICE_MEMORY", 0x032: "CKR_DEVICE_REMOVED",
+	0x021: "CKR_DATA_LEN_RANGE", 0x063: "CKR_KEY_TYPE_INCONSISTENT", 0x068: "CKR_KEY_FUNCTION_NOT_PERMITTED",
+	0x070: "CKR_MECHANISM_INVALID", 0x071: "CKR_MECHANISM_PARAM_INVALID", 0x090: "CKR_OPERATION_ACTIVE",
+	0x091: "CKR_OPERATION_NOT_INITIALIZED", 0x0A0: "CKR_PIN_INCORRECT", 0x0A4: "CKR_PIN_LOCKED",
+	0x0B3: "CKR_SESSION_HANDLE_INVALID", 0x0E0: "CKR_TOKEN_NOT_PRESENT", 0x101: "CKR_USER_NOT_LOGGED_IN",
+	0x150: "CKR_BUFFER_TOO_SMALL",
+}
+
+func (e *Error) Error() string {
+	if name, ok := rvNames[e.RV]; ok {
+		return fmt.Sprintf("%s failed: %s (0x%X)", e.Func, name, e.RV)
+	}
+	return fmt.Sprintf("%s failed: CKR 0x%X", e.Func, e.RV)
+}
 
 func check(name string, rv ckULong) error {
 	if rv == ckrOK {
@@ -233,21 +250,35 @@ func (l *lib) open(slot ckULong) (ckULong, error) {
 	return session, err
 }
 
-// signRaw signs data (a DigestInfo) with CKM_RSA_PKCS.
-func (l *lib) signRaw(session, key ckULong, data []byte) ([]byte, error) {
+// signRaw signs data (a DigestInfo) with CKM_RSA_PKCS. sigLen is the
+// expected signature size (the RSA modulus length): the signature is
+// requested in one call with a buffer of that size, because some vendor
+// drivers mishandle the separate length query. reauth, if set, is called
+// between C_SignInit and C_Sign for keys marked CKA_ALWAYS_AUTHENTICATE.
+func (l *lib) signRaw(session, key ckULong, data []byte, sigLen int, reauth func() error) ([]byte, error) {
 	m := &mechanism{mech: ckmRSAPKCS}
 	if err := check("C_SignInit", l.signInit(session, m, key)); err != nil {
 		return nil, err
 	}
 	runtime.KeepAlive(m)
-	var n ckULong
-	if err := check("C_Sign", l.sign(session, &data[0], ckULong(len(data)), nil, &n)); err != nil {
-		return nil, err
+	if reauth != nil {
+		if err := reauth(); err != nil {
+			return nil, err
+		}
 	}
-	sig := make([]byte, n)
-	if err := check("C_Sign", l.sign(session, &data[0], ckULong(len(data)), &sig[0], &n)); err != nil {
-		return nil, err
+	if sigLen < 64 {
+		sigLen = 1024
+	}
+	sig := make([]byte, sigLen)
+	n := ckULong(len(sig))
+	rv := l.sign(session, &data[0], ckULong(len(data)), &sig[0], &n)
+	if rv == ckrBufferTooSmall && n > ckULong(len(sig)) {
+		sig = make([]byte, n)
+		rv = l.sign(session, &data[0], ckULong(len(data)), &sig[0], &n)
 	}
 	runtime.KeepAlive(data)
+	if err := check("C_Sign", rv); err != nil {
+		return nil, err
+	}
 	return sig[:n], nil
 }
