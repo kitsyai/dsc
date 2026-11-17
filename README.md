@@ -79,12 +79,20 @@ Bound to `127.0.0.1` only. Browsers reach it through the hey hub at
 | `GET` | `/healthz` | | `{"ok": true, "name": "dsc", "version": "…"}` |
 | `GET` | `/certificates` | | `{"certificates": [{"id", "certificate", "label", "source", "subject", "issuer", "notBefore", "notAfter"}]}` |
 | `POST` | `/sign` | `{"certificateId", "data", "document"}` | `{"signature"}` |
+| `POST` | `/validation` | `{"certificate"}` | `{"chain", "ocsps", "crls", "problems"}` |
 
 - `id` is the certificate's SHA-1 thumbprint (hex).
 - `certificate` is the DER certificate, base64.
 - `data` is the bytes to sign, base64, at most 16 KB.
 - `document` is the file name shown in the dialog.
 - `signature` is the RSA signature, base64.
+- `/validation` returns what a PDF needs for long-term validation (PAdES
+  LTV): the certificate's chain up to the root, and OCSP responses (or CRLs)
+  showing that no certificate in it was revoked. All values are base64 DER.
+  dsc fetches them only from the addresses inside the certificates, checks
+  each one against its issuer, and refuses loopback and private-network
+  addresses. A revoked certificate returns `409` with `revoked`. Browsers
+  can't fetch these themselves: CA servers are plain HTTP without CORS.
 
 Errors are `{"error": code, "message": text}`:
 

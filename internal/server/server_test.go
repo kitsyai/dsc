@@ -134,3 +134,22 @@ func TestSignErrors(t *testing.T) {
 		t.Fatalf("oversized data accepted: %d", rec.Code)
 	}
 }
+
+func TestValidationEndpoint(t *testing.T) {
+	h := (&Server{Store: &fakeStore{}, Port: 1}).Handler()
+	hdr := map[string]string{"X-Hey-Client": "t"}
+	if rec := do(h, "POST", "/validation", "127.0.0.1:1", hdr, `{"certificate":"bm90IGEgY2VydA=="}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("garbage certificate: %d", rec.Code)
+	}
+	// A self-signed certificate has no chain and nothing to check.
+	der := testCert(t)
+	body := `{"certificate":"` + base64.StdEncoding.EncodeToString(der) + `"}`
+	rec := do(h, "POST", "/validation", "127.0.0.1:1", hdr, body)
+	var res validationResponse
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &res) != nil || len(res.Chain) != 0 {
+		t.Fatalf("self-signed: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(h, "POST", "/validation", "127.0.0.1:1", nil, body); rec.Code != http.StatusForbidden {
+		t.Fatalf("validation needs X-Hey-Client like every endpoint: %d", rec.Code)
+	}
+}

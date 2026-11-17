@@ -5,6 +5,7 @@
 package server
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,7 @@ import (
 	"crypto/x509"
 
 	"github.com/kitsyai/dsc/internal/keystore"
+	"github.com/kitsyai/dsc/internal/validation"
 )
 
 // Server serves the signing API for one store.
@@ -26,6 +28,10 @@ type Server struct {
 	Version string
 	// Port is the loopback port dsc listens on.
 	Port int
+
+	// Fetch downloads validation data (chain, OCSP, CRL); nil means
+	// validation.PublicHTTP().
+	Fetch validation.Fetcher
 
 	// signMu keeps one signature (and one dialog) at a time.
 	signMu sync.Mutex
@@ -89,6 +95,7 @@ func (s *Server) Handler() http.Handler {
 	})
 	mux.HandleFunc("GET /certificates", s.certificates)
 	mux.HandleFunc("POST /sign", s.sign)
+	mux.HandleFunc("POST /validation", s.validationData)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !s.hostAllowed(r.Host) {
@@ -172,4 +179,67 @@ func (s *Server) sign(w http.ResponseWriter, r *http.Request) {
 	default:
 		fail(w, http.StatusInternalServerError, "sign_failed", err.Error())
 	}
+}
+
+type validationRequest struct {
+	// Certificate is the signing certificate, base64 DER.
+	Certificate string `json:"certificate"`
+}
+
+type validationResponse struct {
+	Chain    []string `json:"chain"`
+	OCSPs    []string `json:"ocsps"`
+	CRLs     []string `json:"crls"`
+	Problems []string `json:"problems"`
+}
+
+// validationData returns what a PDF needs for long-term validation of a
+// signature made with this certificate: its chain and revocation data,
+// fetched only from the URLs inside the certificates. Browsers can't fetch
+// these themselves (plain-HTTP servers without CORS).
+func (s *Server) validationData(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	if err != nil {
+		fail(w, http.StatusBadRequest, "bad_request", "could not read the request")
+		return
+	}
+	var req validationRequest
+	if err := json.Unmarshal(body, &req); err != nil || req.Certificate == "" {
+		fail(w, http.StatusBadRequest, "bad_request", "certificate is required")
+		return
+	}
+	der, err := base64.StdEncoding.DecodeString(req.Certificate)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "bad_request", "certificate must be base64 DER")
+		return
+	}
+	fetch := s.Fetch
+	if fetch == nil {
+		fetch = validation.PublicHTTP()
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	res, err := validation.Collect(ctx, der, nil, fetch)
+	switch {
+	case errors.Is(err, validation.ErrRevoked):
+		fail(w, http.StatusConflict, "revoked", err.Error())
+		return
+	case err != nil:
+		fail(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	out := validationResponse{Chain: []string{}, OCSPs: []string{}, CRLs: []string{}, Problems: res.Problems}
+	if out.Problems == nil {
+		out.Problems = []string{}
+	}
+	for _, c := range res.Chain {
+		out.Chain = append(out.Chain, base64.StdEncoding.EncodeToString(c))
+	}
+	for _, o := range res.OCSPs {
+		out.OCSPs = append(out.OCSPs, base64.StdEncoding.EncodeToString(o))
+	}
+	for _, c := range res.CRLs {
+		out.CRLs = append(out.CRLs, base64.StdEncoding.EncodeToString(c))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
