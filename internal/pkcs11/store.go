@@ -297,12 +297,25 @@ func (s *Store) Sign(id string, data []byte, consent keystore.Consent) ([]byte, 
 type signAttempt struct {
 	mech  ckULong
 	input []byte
+	chunk int // > 0: C_SignUpdate in parts of this size, then C_SignFinal
+}
+
+// partChunk is the C_SignUpdate piece size: well under one smart-card packet.
+const partChunk = 64
+
+func (a signAttempt) name() string {
+	if a.chunk > 0 {
+		return mechName(a.mech) + " (in parts)"
+	}
+	return mechName(a.mech)
 }
 
 // signAttempts orders the mechanisms to try. CKM_SHA256_RSA_PKCS (the token
 // hashes) comes first: some cards, such as the ePass2003, refuse raw
 // CKM_RSA_PKCS with CKR_DEVICE_ERROR. Both produce the same RSA PKCS#1 v1.5
-// SHA-256 signature. If the driver doesn't list its mechanisms, try both.
+// SHA-256 signature. The token-hashing method is tried in one C_Sign, then
+// fed in parts, since some drivers fail single-part hashing on longer data.
+// If the driver doesn't list its mechanisms, every method is tried.
 func signAttempts(mechs []ckULong, data []byte) []signAttempt {
 	sum := sha256.Sum256(data)
 	hashed := signAttempt{mech: ckmSHA256RSAPKCS, input: data}
@@ -311,13 +324,14 @@ func signAttempts(mechs []ckULong, data []byte) []signAttempt {
 	for _, m := range mechs {
 		has[m] = true
 	}
+	hashedParts := signAttempt{mech: ckmSHA256RSAPKCS, input: data, chunk: partChunk}
 	switch {
 	case has[ckmSHA256RSAPKCS] && !has[ckmRSAPKCS]:
-		return []signAttempt{hashed}
+		return []signAttempt{hashed, hashedParts}
 	case has[ckmRSAPKCS] && !has[ckmSHA256RSAPKCS]:
 		return []signAttempt{raw}
 	default:
-		return []signAttempt{hashed, raw}
+		return []signAttempt{hashed, hashedParts, raw}
 	}
 }
 
@@ -360,11 +374,11 @@ func (s *Store) signOnToken(ref certRef, pinPad bool, pin string, data []byte) (
 		}
 		if err == nil {
 			if i > 0 {
-				fmt.Fprintf(os.Stderr, "dsc: signed with %s\n", mechName(a.mech))
+				fmt.Fprintf(os.Stderr, "dsc: signed with %s (%d bytes)\n", a.name(), len(data))
 			}
 			return sig, nil
 		}
-		fmt.Fprintf(os.Stderr, "dsc: %s with %s failed: %v\n", mechName(a.mech), ref.lib.path, err)
+		fmt.Fprintf(os.Stderr, "dsc: %s with %s failed on %d bytes: %v\n", a.name(), ref.lib.path, len(data), err)
 		last = err
 		if !retryable(err) {
 			break
@@ -412,7 +426,7 @@ func (s *Store) signOnce(ref certRef, pinPad bool, pinBytes []byte, a signAttemp
 	if pub, ok := ref.cert.PublicKey.(*rsa.PublicKey); ok {
 		sigLen = pub.Size()
 	}
-	return l.signWith(session, keys[0], a.mech, a.input, sigLen, reauth)
+	return l.signWith(session, keys[0], a.mech, a.input, sigLen, reauth, a.chunk)
 }
 
 // Close finalizes every loaded driver.

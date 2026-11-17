@@ -130,6 +130,8 @@ type lib struct {
 	getAttributeValue func(session, object ckULong, template *attribute, count ckULong) ckULong
 	signInit          func(session ckULong, mech *mechanism, key ckULong) ckULong
 	sign              func(session ckULong, data *byte, dataLen ckULong, sig *byte, sigLen *ckULong) ckULong
+	signUpdate        func(session ckULong, part *byte, partLen ckULong) ckULong
+	signFinal         func(session ckULong, sig *byte, sigLen *ckULong) ckULong
 }
 
 func load(path string) (l *lib, err error) {
@@ -161,6 +163,8 @@ func load(path string) (l *lib, err error) {
 	reg(&l.getAttributeValue, "C_GetAttributeValue")
 	reg(&l.signInit, "C_SignInit")
 	reg(&l.sign, "C_Sign")
+	reg(&l.signUpdate, "C_SignUpdate")
+	reg(&l.signFinal, "C_SignFinal")
 
 	args := &initArgs{flags: ckfOSLockingOK}
 	rv := l.initialize(unsafe.Pointer(args))
@@ -288,7 +292,11 @@ func (l *lib) open(slot ckULong) (ckULong, error) {
 // requested in one call with a buffer of that size, because some vendor
 // drivers mishandle the separate length query. reauth, if set, is called
 // between C_SignInit and C_Sign for keys marked CKA_ALWAYS_AUTHENTICATE.
-func (l *lib) signWith(session, key, mech ckULong, data []byte, sigLen int, reauth func() error) ([]byte, error) {
+//
+// chunk > 0 feeds data through C_SignUpdate in pieces of that size and
+// finishes with C_SignFinal; some drivers (ePass2003) fail single-part
+// C_Sign with on-token hashing once data exceeds a smart-card packet.
+func (l *lib) signWith(session, key, mech ckULong, data []byte, sigLen int, reauth func() error, chunk int) ([]byte, error) {
 	m := &mechanism{mech: mech}
 	if err := check("C_SignInit", l.signInit(session, m, key)); err != nil {
 		return nil, err
@@ -304,6 +312,25 @@ func (l *lib) signWith(session, key, mech ckULong, data []byte, sigLen int, reau
 	}
 	sig := make([]byte, sigLen)
 	n := ckULong(len(sig))
+	if chunk > 0 {
+		for off := 0; off < len(data); off += chunk {
+			end := min(off+chunk, len(data))
+			part := data[off:end]
+			if err := check("C_SignUpdate", l.signUpdate(session, &part[0], ckULong(len(part)))); err != nil {
+				return nil, err
+			}
+		}
+		runtime.KeepAlive(data)
+		rv := l.signFinal(session, &sig[0], &n)
+		if rv == ckrBufferTooSmall && n > ckULong(len(sig)) {
+			sig = make([]byte, n)
+			rv = l.signFinal(session, &sig[0], &n)
+		}
+		if err := check("C_SignFinal", rv); err != nil {
+			return nil, err
+		}
+		return sig[:n], nil
+	}
 	rv := l.sign(session, &data[0], ckULong(len(data)), &sig[0], &n)
 	if rv == ckrBufferTooSmall && n > ckULong(len(sig)) {
 		sig = make([]byte, n)

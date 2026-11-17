@@ -174,14 +174,14 @@ func TestSignAttemptOrder(t *testing.T) {
 	order := func(mechs ...ckULong) string {
 		var out []string
 		for _, a := range signAttempts(mechs, []byte("data")) {
-			out = append(out, mechName(a.mech))
+			out = append(out, a.name())
 		}
 		return strings.Join(out, ",")
 	}
 	cases := map[string]string{
-		order():                             "CKM_SHA256_RSA_PKCS,CKM_RSA_PKCS",
-		order(ckmRSAPKCS, ckmSHA256RSAPKCS): "CKM_SHA256_RSA_PKCS,CKM_RSA_PKCS",
-		order(ckmSHA256RSAPKCS):             "CKM_SHA256_RSA_PKCS",
+		order():                             "CKM_SHA256_RSA_PKCS,CKM_SHA256_RSA_PKCS (in parts),CKM_RSA_PKCS",
+		order(ckmRSAPKCS, ckmSHA256RSAPKCS): "CKM_SHA256_RSA_PKCS,CKM_SHA256_RSA_PKCS (in parts),CKM_RSA_PKCS",
+		order(ckmSHA256RSAPKCS):             "CKM_SHA256_RSA_PKCS,CKM_SHA256_RSA_PKCS (in parts)",
 		order(ckmRSAPKCS):                   "CKM_RSA_PKCS",
 	}
 	for got, want := range cases {
@@ -204,17 +204,18 @@ func TestSoftHSMEachMechanismVerifies(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := store.refs[keystore.ID(cert.Raw)]
-	data := []byte("signed attributes")
+	// 700 bytes: longer than one smart-card packet, like real signed attributes.
+	data := []byte(strings.Repeat("signed attributes ", 39))
 	sum := sha256.Sum256(data)
 	for _, a := range signAttempts(nil, data) {
 		var sig []byte
 		var err error
 		store.onThread(func() { sig, err = store.signOnce(ref, false, []byte("1234"), a) })
 		if err != nil {
-			t.Fatalf("%s: %v", mechName(a.mech), err)
+			t.Fatalf("%s: %v", a.name(), err)
 		}
 		if err := rsa.VerifyPKCS1v15(&key.PublicKey, crypto.SHA256, sum[:], sig); err != nil {
-			t.Fatalf("%s: signature does not verify: %v", mechName(a.mech), err)
+			t.Fatalf("%s: signature does not verify: %v", a.name(), err)
 		}
 	}
 }

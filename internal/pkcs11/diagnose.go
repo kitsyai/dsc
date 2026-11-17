@@ -101,32 +101,60 @@ func (s *Store) Diagnose(w io.Writer) error {
 		}
 		pin = p
 	}
-	data := []byte("dsc diagnose test message")
-	sum := sha256.Sum256(data)
 	pinBytes := []byte(pin)
 	defer func() {
 		for i := range pinBytes {
 			pinBytes[i] = 0
 		}
 	}()
-	for _, a := range signAttempts(nil, data) {
-		var sig []byte
-		var err error
-		s.onThread(func() {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			sig, err = s.signOnce(ref, pinPad, pinBytes, a)
-		})
-		switch {
-		case err != nil:
-			fmt.Fprintf(w, "  %-22s failed: %v\n", mechName(a.mech), err)
-			if !retryable(err) {
-				return nil // PIN errors: stop, don't risk locking the token
+	// Real PDF signatures sign a few hundred bytes (the CMS signed
+	// attributes), more than one smart-card packet; test across that range.
+	sizes := []int{32, 128, 256, 512, 1024}
+	fmt.Fprintf(w, "  %-34s", "bytes signed:")
+	for _, n := range sizes {
+		fmt.Fprintf(w, "%7d", n)
+	}
+	fmt.Fprintln(w)
+	var failures []string
+	for _, a := range signAttempts(nil, nil) {
+		fmt.Fprintf(w, "  %-34s", a.name())
+		for _, n := range sizes {
+			data := []byte(strings.Repeat("d", n))
+			sum := sha256.Sum256(data)
+			attempt := a
+			attempt.input = data
+			if a.mech == ckmRSAPKCS {
+				attempt.input = append(append([]byte{}, keystore.SHA256DigestInfo...), sum[:]...)
 			}
-		case rsa.VerifyPKCS1v15(pub, crypto.SHA256, sum[:], sig) != nil:
-			fmt.Fprintf(w, "  %-22s signed, but the signature does not verify\n", mechName(a.mech))
-		default:
-			fmt.Fprintf(w, "  %-22s OK (signature verified)\n", mechName(a.mech))
+			var sig []byte
+			var err error
+			s.onThread(func() {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				sig, err = s.signOnce(ref, pinPad, pinBytes, attempt)
+			})
+			switch {
+			case err != nil:
+				fmt.Fprintf(w, "%7s", "FAIL")
+				failures = append(failures, fmt.Sprintf("%s, %d bytes: %v", a.name(), n, err))
+				if !retryable(err) {
+					fmt.Fprintln(w)
+					fmt.Fprintf(w, "\nStopped: %v\n", err)
+					return nil // PIN errors: stop, don't risk locking the token
+				}
+			case rsa.VerifyPKCS1v15(pub, crypto.SHA256, sum[:], sig) != nil:
+				fmt.Fprintf(w, "%7s", "BAD")
+				failures = append(failures, fmt.Sprintf("%s, %d bytes: signature does not verify", a.name(), n))
+			default:
+				fmt.Fprintf(w, "%7s", "OK")
+			}
+		}
+		fmt.Fprintln(w)
+	}
+	if len(failures) > 0 {
+		fmt.Fprintln(w, "\nFailures:")
+		for _, f := range failures {
+			fmt.Fprintln(w, "  "+f)
 		}
 	}
 	return nil
